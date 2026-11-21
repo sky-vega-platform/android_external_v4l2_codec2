@@ -169,9 +169,12 @@ bool V4L2Decoder::start(const VideoCodec& codec, const size_t inputBufferSize,
         ALOGE("Failed to setup input format.");
         return false;
     }
+    // Drivers such as Venus only report the CAPTURE format once the stream
+    // header is parsed, so the initial EOS buffer cannot be set up before.
+    // It only serves a drain before the first frame: go on without it.
     if (!setupInitialOutput()) {
-        ALOGE("Unable to setup initial output");
-        return false;
+        ALOGW("Unable to setup initial output, going on without an initial EOS buffer");
+        mInitialEosBuffer = nullptr;
     }
 
     if (!mDevice->startPolling(mTaskRunner,
