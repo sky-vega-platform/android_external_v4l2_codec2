@@ -8,7 +8,11 @@
 
 #include <v4l2_codec2/v4l2/V4L2Decoder.h>
 
+#include <errno.h>
+#include <linux/dma-buf.h>
 #include <stdint.h>
+#include <string.h>
+#include <sys/ioctl.h>
 
 #include <algorithm>
 #include <vector>
@@ -16,6 +20,7 @@
 #include <base/bind.h>
 #include <base/files/scoped_file.h>
 #include <base/memory/ptr_util.h>
+#include <base/posix/eintr_wrapper.h>
 #include <log/log.h>
 #include <utils/Trace.h>
 
@@ -30,6 +35,15 @@ namespace {
 
 // Extra buffers for transmitting in the whole video pipeline.
 constexpr size_t kNumExtraOutputBuffers = 4;
+
+// Ends a CPU write access to |fd|, which writes the CPU caches back for the devices it is
+// attached to.
+void syncDmaBufForDevice(int fd) {
+    struct dma_buf_sync sync = {.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE};
+    if (HANDLE_EINTR(ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync)) != 0) {
+        ALOGW("DMA_BUF_IOCTL_SYNC failed on fd %d: %s", fd, strerror(errno));
+    }
+}
 
 bool waitForDRC(const C2ConstLinearBlock& input, std::optional<VideoCodec> codec) {
     C2ReadView view = input.map().get();
@@ -521,6 +535,10 @@ void V4L2Decoder::pumpDecodeRequest() {
         inputBuffer->setPlaneBytesUsed(0, request.buffer->offset + request.buffer->size);
         std::vector<int> fds;
         fds.push_back(std::move(request.buffer->dmabuf.handle()->data[0]));
+        // The bitstream was written by the CPU, and the C2 allocators leave it in its caches.
+        // V4L2 does not sync imported dma-bufs on QBUF, so a decoder that does not snoop the CPU
+        // caches would read what an earlier frame left in a reused buffer.
+        syncDmaBufForDevice(fds[0]);
         if (!std::move(*inputBuffer).queueDMABuf(fds)) {
             ALOGE("%s(): Failed to QBUF to input queue, bitstreamId=%d", __func__, bitstreamId);
             onError();
