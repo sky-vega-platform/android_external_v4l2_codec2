@@ -8,6 +8,9 @@
 #include <v4l2_codec2/v4l2/V4L2Encoder.h>
 
 #include <stdint.h>
+#include <string.h>
+
+#include <algorithm>
 #include <optional>
 #include <vector>
 
@@ -831,26 +834,15 @@ bool V4L2Encoder::enqueueOutputBuffer() {
         return false;
     }
 
-    std::unique_ptr<BitstreamBuffer> bitstreamBuffer;
-    mFetchOutputBufferCb.Run(mOutputBufferSize, &bitstreamBuffer);
-    if (!bitstreamBuffer) {
-        ALOGE("Failed to fetch output block");
-        onError();
-        return false;
-    }
-
+    // The bitstream buffers are the device's own (see createOutputBuffers()); the encoded data is
+    // copied into an output block when it comes back.
     size_t bufferId = buffer->bufferId();
-
-    std::vector<int> fds;
-    fds.push_back(bitstreamBuffer->dmabuf->handle()->data[0]);
-    if (!std::move(*buffer).queueDMABuf(fds)) {
-        ALOGE("Failed to queue output buffer using QueueDMABuf");
+    if (!std::move(*buffer).queueMMap()) {
+        ALOGE("Failed to queue output buffer %zu", bufferId);
         onError();
         return false;
     }
 
-    ALOG_ASSERT(!mOutputBuffers[bufferId]);
-    mOutputBuffers[bufferId] = std::move(bitstreamBuffer);
     ALOGV("%s(): Queued buffer in output queue (bufferId: %zu)", __func__, bufferId);
     return true;
 }
@@ -931,14 +923,26 @@ bool V4L2Encoder::dequeueOutputBuffer() {
           ", bufferId: %zu, data size: %zu, EOS: %d)",
           timestamp.InMicroseconds(), buffer->bufferId(), encodedDataSize, buffer->isLast());
 
-    if (!mOutputBuffers[buffer->bufferId()]) {
-        ALOGE("Failed to find output block associated with output buffer");
-        onError();
-        return false;
+    std::unique_ptr<BitstreamBuffer> bitstreamBuffer;
+    if (encodedDataSize > 0) {
+        mFetchOutputBufferCb.Run(std::max<size_t>(encodedDataSize, 1), &bitstreamBuffer);
+        const void* data = buffer->getPlaneMapping(0);
+        if (!bitstreamBuffer || !data) {
+            ALOGE("Failed to fetch an output block or to map output buffer %zu",
+                  buffer->bufferId());
+            onError();
+            return false;
+        }
+        C2WriteView writeView = bitstreamBuffer->dmabuf->map().get();
+        if (writeView.error() != C2_OK || writeView.size() < encodedDataSize) {
+            ALOGE("Output block too small (%u < %zu)", writeView.size(), encodedDataSize);
+            onError();
+            return false;
+        }
+        memcpy(writeView.data(),
+               static_cast<const uint8_t*>(data) + buffer->getPlaneDataOffset(0),
+               encodedDataSize);
     }
-
-    std::unique_ptr<BitstreamBuffer> bitstreamBuffer =
-            std::move(mOutputBuffers[buffer->bufferId()]);
     if (encodedDataSize > 0) {
         if (!mInjectParamsBeforeIDR) {
             // No need to inject SPS or PPS before IDR frames, we can just return the buffer as-is.
@@ -1028,9 +1032,10 @@ bool V4L2Encoder::createOutputBuffers() {
     ALOG_ASSERT(!mOutputQueue->isStreaming());
     ALOG_ASSERT(mOutputBuffers.empty());
 
-    // No memory is allocated here, we just generate a list of buffers on the output queue, which
-    // will hold memory handles to the real buffers.
-    if (mOutputQueue->allocateBuffers(kOutputBufferCount, V4L2_MEMORY_DMABUF) <
+    // The device allocates the bitstream buffers. Venus 3xx firmware only takes the encoder output
+    // buffers it was given at stream on (no dynamic buffer mode), while output blocks come from a
+    // pool that hands out new buffers all the time.
+    if (mOutputQueue->allocateBuffers(kOutputBufferCount, V4L2_MEMORY_MMAP) <
         kOutputBufferCount) {
         ALOGE("Failed to create V4L2 output buffers.");
         return false;
