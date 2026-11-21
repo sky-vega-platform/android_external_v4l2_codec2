@@ -198,7 +198,17 @@ std::unique_ptr<VideoFramePool> DecodeComponent::getVideoFramePool(const ui::Siz
     auto poolId = mIntfImpl->getBlockPoolId();
     ALOGI("Using C2BlockPool ID = %" PRIu64 " for allocating output buffers", poolId);
     std::shared_ptr<C2BlockPool> blockPool;
-    auto status = GetCodec2BlockPool(poolId, std::move(sharedThis), &blockPool);
+    c2_status_t status;
+    if (poolId == C2BlockPool::BASIC_GRAPHIC) {
+        // A client that reads the output from byte buffers leaves the default pool, which
+        // allocates a new buffer for every frame. The decoder needs its buffers back, to keep
+        // each of them in the V4L2 buffer it was first queued in, so recycle them through a
+        // buffer pool instead.
+        status = CreateCodec2BlockPool(C2PlatformAllocatorStore::GRALLOC, std::move(sharedThis),
+                                       &blockPool);
+    } else {
+        status = GetCodec2BlockPool(poolId, std::move(sharedThis), &blockPool);
+    }
     if (status != C2_OK) {
         ALOGE("Graphic block allocator is invalid: %d", status);
         reportError(status);
