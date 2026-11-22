@@ -217,6 +217,8 @@ bool GpuConverter::drawInto(void* image, uint32_t program, uint32_t width, uint3
         return false;
     }
     glViewport(0, 0, width, height);
+    // The draw covers all of the plane: clearing first spares loading the old contents in.
+    glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(program);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, mSrcTexture);
