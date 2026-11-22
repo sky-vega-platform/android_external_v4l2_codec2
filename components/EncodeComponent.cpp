@@ -8,6 +8,8 @@
 #include <v4l2_codec2/components/EncodeComponent.h>
 
 #include <inttypes.h>
+#include <poll.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <utility>
@@ -199,6 +201,7 @@ EncodeComponent::~EncodeComponent() {
                                    &mWeakThisFactory, &mEncoder));
         mEncoderThread.Stop();
     }
+    mFenceThread.Stop();
 
     ALOGV("%s(): done", __func__);
 }
@@ -216,6 +219,10 @@ c2_status_t EncodeComponent::start() {
 
     if (!mEncoderThread.Start()) {
         ALOGE("Failed to start encoder thread");
+        return C2_CORRUPTED;
+    }
+    if (!mFenceThread.IsRunning() && !mFenceThread.Start()) {
+        ALOGE("Failed to start fence thread");
         return C2_CORRUPTED;
     }
     mEncoderTaskRunner = mEncoderThread.task_runner();
@@ -258,6 +265,8 @@ c2_status_t EncodeComponent::stop() {
                                  ::base::BindOnce(&EncodeComponent::stopTask, mWeakThis, &done));
     done.Wait();
     mEncoderThread.Stop();
+    // Let the waits for the GPU still queued end: what they would have gone on with is dropped.
+    mFenceThread.Stop();
 
     setComponentState(ComponentState::LOADED);
 
@@ -446,8 +455,9 @@ void EncodeComponent::queueTask(std::unique_ptr<C2Work> work) {
     }
 
     // If this is the first input frame, create an input format converter if the V4L2 device doesn't
-    // support the requested input format.
-    if ((mInputPixelFormat == VideoPixelFormat::UNKNOWN) && !work->input.buffers.empty()) {
+    // support the requested input format. The first frames might still be being converted.
+    if ((mInputPixelFormat == VideoPixelFormat::UNKNOWN) && !mInputFormatConverter &&
+        !work->input.buffers.empty()) {
         VideoPixelFormat format = VideoPixelFormat::UNKNOWN;
         if (!getVideoFrameLayout(work->input.buffers.front()->data().graphicBlocks().front(),
                                  &format)) {
@@ -485,11 +495,16 @@ void EncodeComponent::queueTask(std::unique_ptr<C2Work> work) {
                 work->input.buffers.front()->data().graphicBlocks().front();
         if (mInputFormatConverter) {
             ALOGV("Converting input block (index: %" PRIu64 ")", index);
-            c2_status_t status =
-                    mInputFormatConverter->convertBlock(index, inputBlock, &inputBlock);
+            int fenceFd = -1;
+            c2_status_t status = mInputFormatConverter->convertBlock(index, inputBlock,
+                                                                     &inputBlock, &fenceFd);
             if (status != C2_OK) {
                 ALOGE("Failed to convert input block (index: %" PRIu64 ")", index);
                 reportError(status);
+                return;
+            }
+            if (fenceFd >= 0 || mPendingConversions) {
+                deferWork(std::move(work), inputBlock, fenceFd);
                 return;
             }
         } else {
@@ -522,10 +537,80 @@ void EncodeComponent::queueTask(std::unique_ptr<C2Work> work) {
         if (!encode(inputBlock, index, timestamp)) {
             return;
         }
+    } else if (mPendingConversions) {
+        // Keep the end of the stream behind the frames still being converted.
+        deferWork(std::move(work), std::nullopt, -1);
+        return;
     }
 
     mWorkQueue.push_back(std::move(work));
     if (endOfStream) {
+        mEncoder->drain();
+    }
+}
+
+void EncodeComponent::deferWork(std::unique_ptr<C2Work> work,
+                                std::optional<C2ConstGraphicBlock> convertedBlock, int fenceFd) {
+    ALOGV("%s()", __func__);
+    ALOG_ASSERT(mEncoderTaskRunner->RunsTasksInCurrentSequence());
+
+    mPendingConversions++;
+    mFenceThread.task_runner()->PostTask(
+            FROM_HERE,
+            ::base::BindOnce(
+                    [](int fd, scoped_refptr<::base::SequencedTaskRunner> taskRunner,
+                       ::base::OnceClosure goOn) {
+                        if (fd >= 0) {
+                            struct pollfd pfd = {.fd = fd, .events = POLLIN};
+                            // A GPU that takes longer has hung: let the encoder have the frame.
+                            if (poll(&pfd, 1, 1000) != 1) {
+                                ALOGW("Input conversion did not complete");
+                            }
+                            close(fd);
+                        }
+                        taskRunner->PostTask(FROM_HERE, std::move(goOn));
+                    },
+                    fenceFd, mEncoderTaskRunner,
+                    ::base::BindOnce(&EncodeComponent::onInputConverted, mWeakThis,
+                                     std::move(work), std::move(convertedBlock),
+                                     mConversionGeneration)));
+}
+
+void EncodeComponent::onInputConverted(std::unique_ptr<C2Work> work,
+                                       std::optional<C2ConstGraphicBlock> convertedBlock,
+                                       uint64_t generation) {
+    ALOGV("%s()", __func__);
+    ALOG_ASSERT(mEncoderTaskRunner->RunsTasksInCurrentSequence());
+
+    uint64_t index = work->input.ordinal.frameIndex.peeku();
+    if (generation != mConversionGeneration) {
+        ALOGV("Dropping work item %" PRIu64 " deferred before a flush", index);
+        if (convertedBlock && mInputFormatConverter) mInputFormatConverter->returnBlock(index);
+        work->result = C2_NOT_FOUND;
+        work->input.buffers.clear();
+        std::list<std::unique_ptr<C2Work>> abortedWorkItems;
+        abortedWorkItems.push_back(std::move(work));
+        mListener->onWorkDone_nb(weak_from_this(), std::move(abortedWorkItems));
+        return;
+    }
+
+    ALOG_ASSERT(mPendingConversions > 0);
+    mPendingConversions--;
+
+    int64_t timestamp = static_cast<int64_t>(work->input.ordinal.timestamp.peeku());
+    if (convertedBlock && !encode(*convertedBlock, index, timestamp)) {
+        return;
+    }
+
+    bool endOfStream = work->input.flags & C2FrameData::FLAG_END_OF_STREAM;
+    if (!endOfStream && !mPendingConversions && mDrainAfterConversions) {
+        work->input.flags = static_cast<C2FrameData::flags_t>(work->input.flags |
+                                                              C2FrameData::FLAG_END_OF_STREAM);
+        endOfStream = true;
+    }
+    mWorkQueue.push_back(std::move(work));
+    if (endOfStream) {
+        mDrainAfterConversions = false;
         mEncoder->drain();
     }
 }
@@ -540,6 +625,12 @@ void EncodeComponent::drainTask(drain_mode_t /*drainMode*/) {
         C2Work* work = mInputConverterQueue.back().get();
         work->input.flags = static_cast<C2FrameData::flags_t>(work->input.flags |
                                                               C2FrameData::FLAG_END_OF_STREAM);
+        return;
+    }
+
+    // Likewise, wait for the work items whose input is being converted to be queued.
+    if (mPendingConversions) {
+        mDrainAfterConversions = true;
         return;
     }
 
@@ -745,6 +836,11 @@ void EncodeComponent::flush() {
     ALOG_ASSERT(mEncoderTaskRunner->RunsTasksInCurrentSequence());
 
     mEncoder->flush();
+
+    // The work items deferred until their input is converted will be aborted when they come back.
+    mConversionGeneration++;
+    mPendingConversions = 0;
+    mDrainAfterConversions = false;
 
     // Report all queued work items as aborted.
     std::list<std::unique_ptr<C2Work>> abortedWorkItems;

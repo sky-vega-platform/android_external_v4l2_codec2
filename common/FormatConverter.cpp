@@ -175,7 +175,8 @@ c2_status_t FormatConverter::allocateBuffers(uint32_t count) {
 
 c2_status_t FormatConverter::convertBlock(uint64_t frameIndex,
                                           const C2ConstGraphicBlock& inputBlock,
-                                          C2ConstGraphicBlock* convertedBlock) {
+                                          C2ConstGraphicBlock* convertedBlock, int* fenceFd) {
+    if (fenceFd) *fenceFd = -1;
     const C2GraphicView& inputView = inputBlock.map().get();
     C2PlanarLayout inputLayout = inputView.layout();
 
@@ -312,7 +313,8 @@ c2_status_t FormatConverter::convertBlock(uint64_t frameIndex,
                                                 static_cast<uint32_t>(dstStrideUV)};
                 if (mGpuConverter &&
                     mGpuConverter->convertRgbaToNv12(src, width, height, y, uv,
-                                                     mVisibleSize.width, mVisibleSize.height)) {
+                                                     mVisibleSize.width, mVisibleSize.height,
+                                                     fenceFd)) {
                     break;
                 }
                 if (mGpuConverter) {

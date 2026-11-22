@@ -79,6 +79,13 @@ protected:
     void stopTask(::base::WaitableEvent* done);
     // Queue a new encode work item on the encoder thread.
     void queueTask(std::unique_ptr<C2Work> work);
+    // Have |work| go on once the conversion of its input, |convertedBlock|, is done, which
+    // |fenceFd| signals. Work items deferred this way go on in order.
+    void deferWork(std::unique_ptr<C2Work> work,
+                   std::optional<C2ConstGraphicBlock> convertedBlock, int fenceFd);
+    // Go on with |work| deferred by deferWork(), unless a flush came in the meantime.
+    void onInputConverted(std::unique_ptr<C2Work> work,
+                          std::optional<C2ConstGraphicBlock> convertedBlock, uint64_t generation);
     // Drain all currently scheduled work on the encoder thread. The encoder will process all
     // scheduled work and mark the last item as EOS, before processing any new work.
     void drainTask(drain_mode_t drainMode);
@@ -181,6 +188,15 @@ protected:
 
     // The encoder thread on which all interaction with the V4L2 device is performed.
     ::base::Thread mEncoderThread{"EncodeComponentThread"};
+    // The thread waiting for the GPU to convert input frames, so the encoder thread can take the
+    // next frames meanwhile: waiting there takes as long as the GPU has other work queued.
+    ::base::Thread mFenceThread{"EncodeComponentFenceThread"};
+    // The number of work items deferred until their input is converted.
+    size_t mPendingConversions = 0;
+    // Whether a drain was requested while there were work items deferred.
+    bool mDrainAfterConversions = false;
+    // Incremented on flush, to drop the work items deferred before.
+    uint64_t mConversionGeneration = 0;
     // The task runner on the encoder thread.
     scoped_refptr<::base::SequencedTaskRunner> mEncoderTaskRunner;
 

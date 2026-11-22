@@ -23,7 +23,7 @@ struct BitstreamBuffer;
 class VideoEncoder {
 public:
     // Number of buffers on component delays.
-    static constexpr size_t kInputBufferCount = 2;
+    static constexpr size_t kInputBufferCount = 4;
     static constexpr size_t kOutputBufferCount = 2;
     static constexpr VideoPixelFormat kInputPixelFormat = VideoPixelFormat::NV12;
 

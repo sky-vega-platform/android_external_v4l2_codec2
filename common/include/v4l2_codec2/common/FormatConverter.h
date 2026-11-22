@@ -57,9 +57,11 @@ public:
                                                    const ui::Size& codedSize);
 
     // Convert the |inputBlock| to the configured pixel format and return it as |convertedBlock|.
-    // Returns the original block if no conversion is required.
+    // Returns the original block if no conversion is required. Given |fenceFd|, a conversion on
+    // the GPU may still be running on return: |*fenceFd| is then a sync file that signals when
+    // |convertedBlock| is ready, and -1 otherwise.
     c2_status_t convertBlock(uint64_t frameIndex, const C2ConstGraphicBlock& inputBlock,
-                             C2ConstGraphicBlock* convertedBlock);
+                             C2ConstGraphicBlock* convertedBlock, int* fenceFd = nullptr);
     // Return the block ownership when VEA no longer needs it, or erase the zero-copy BlockEntry.
     c2_status_t returnBlock(uint64_t frameIndex);
     // Check if there is available block for conversion.

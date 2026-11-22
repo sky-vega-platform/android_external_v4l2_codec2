@@ -28,10 +28,12 @@ public:
     ~GpuConverter();
 
     // Converts the |width|x|height| RGBA (R, G, B, A bytes) image in |src| into the NV12 planes
-    // |dstY| and |dstUV|. Returns once the GPU is done.
+    // |dstY| and |dstUV|. Returns once the GPU is done, or, given |fenceFd|, as soon as the work is
+    // submitted, with |*fenceFd| a sync file that signals when the GPU is done, or -1 if it is
+    // already.
     bool convertRgbaToNv12(const Plane& src, uint32_t srcWidth, uint32_t srcHeight,
                            const Plane& dstY, const Plane& dstUV, uint32_t width,
-                           uint32_t height);
+                           uint32_t height, int* fenceFd = nullptr);
 
 private:
     GpuConverter() = default;

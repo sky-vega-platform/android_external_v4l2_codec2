@@ -228,7 +228,8 @@ bool GpuConverter::drawInto(void* image, uint32_t program, uint32_t width, uint3
 
 bool GpuConverter::convertRgbaToNv12(const Plane& src, uint32_t srcWidth, uint32_t srcHeight,
                                      const Plane& dstY, const Plane& dstUV, uint32_t width,
-                                     uint32_t height) {
+                                     uint32_t height, int* fenceFd) {
+    if (fenceFd) *fenceFd = -1;
     void* srcImage = importImage(src, kDrmFormatAbgr8888, srcWidth, srcHeight);
     void* yImage = importImage(dstY, kDrmFormatR8, width, height);
     void* uvImage = importImage(dstUV, kDrmFormatGr88, width / 2, height / 2);
@@ -239,8 +240,21 @@ bool GpuConverter::convertRgbaToNv12(const Plane& src, uint32_t srcWidth, uint32
         glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, static_cast<GLeglImageOES>(srcImage));
         ok = drawInto(yImage, mProgramY, width, height) &&
              drawInto(uvImage, mProgramUV, width / 2, height / 2);
-        // The encoder reads the planes as soon as we return.
-        glFinish();
+        // The encoder must not read the planes before the GPU is done: hand out a fence for that,
+        // or wait here.
+        bool waited = false;
+        if (fenceFd) {
+            const EGLint attribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID,
+                                      EGL_NO_NATIVE_FENCE_FD_ANDROID, EGL_NONE};
+            EGLSyncKHR sync = eglCreateSyncKHR(mDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
+            if (sync != EGL_NO_SYNC_KHR) {
+                glFlush();
+                *fenceFd = eglDupNativeFenceFDANDROID(mDisplay, sync);
+                eglDestroySyncKHR(mDisplay, sync);
+                waited = *fenceFd >= 0;
+            }
+        }
+        if (!waited) glFinish();
         // Detach the images before they go.
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         if (glGetError() != GL_NO_ERROR) ok = false;
