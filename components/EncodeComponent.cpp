@@ -457,7 +457,8 @@ void EncodeComponent::queueTask(std::unique_ptr<C2Work> work) {
         }
         if (mEncoder->inputFormat() != format) {
             ALOG_ASSERT(!mInputFormatConverter);
-            ALOGV("Creating input format convertor (%s)",
+            ALOGI("Converting %s input frames to %s",
+                  videoPixelFormatToString(format).c_str(),
                   videoPixelFormatToString(mEncoder->inputFormat()).c_str());
             mInputFormatConverter =
                     FormatConverter::create(mEncoder->inputFormat(), mEncoder->visibleSize(),

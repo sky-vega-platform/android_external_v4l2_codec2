@@ -20,6 +20,7 @@ cc_library {
         "EncodeHelpers.cpp",
         "FormatConverter.cpp",
         "Fourcc.cpp",
+        "GpuConverter.cpp",
         "H264NalParser.cpp",
         "HEVCNalParser.cpp",
         "NalParser.cpp",
@@ -32,6 +33,8 @@ cc_library {
     ],
 
     shared_libs: [
+        "libEGL",
+        "libGLESv2",
         "libchrome",
         "libcutils",
         "liblog",

@@ -13,6 +13,7 @@
 #include <ui/Size.h>
 #include <utils/StrongPointer.h>
 
+#include <v4l2_codec2/common/GpuConverter.h>
 #include <v4l2_codec2/common/VideoPixelFormat.h>
 
 namespace android {
@@ -105,6 +106,11 @@ private:
     // allocated on initialize().
     std::unique_ptr<uint8_t[]> mTempPlaneU;
     std::unique_ptr<uint8_t[]> mTempPlaneV;
+
+    // Converts RGBA input on the GPU, created on the first such frame; |mGpuFailed| once it could
+    // not be set up or failed, to go on with the CPU.
+    std::unique_ptr<GpuConverter> mGpuConverter;
+    bool mGpuFailed = false;
 
     // The output pixel format.
     VideoPixelFormat mOutFormat = VideoPixelFormat::UNKNOWN;

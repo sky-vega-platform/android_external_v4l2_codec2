@@ -292,6 +292,35 @@ c2_status_t FormatConverter::convertBlock(uint64_t frameIndex,
                                dstStrideV, mVisibleSize.width, mVisibleSize.height);
             break;
         case convertMap(VideoPixelFormat::ABGR, VideoPixelFormat::NV12): {
+            // The input comes from the GPU, which leaves it write-combined: reading it back with
+            // the CPU is too slow for video, so have the GPU convert it.
+            if (!idMap && !mGpuFailed) {
+                if (!mGpuConverter) {
+                    mGpuConverter = GpuConverter::create();
+                    if (!mGpuConverter) mGpuFailed = true;
+                }
+                uint32_t width, height, format, stride, generation, igbpSlot;
+                uint64_t usage, igbpId;
+                android::_UnwrapNativeCodec2GrallocMetadata(inputBlock.handle(), &width, &height,
+                                                            &format, &usage, &stride, &generation,
+                                                            &igbpId, &igbpSlot);
+                const GpuConverter::Plane src = {inputBlock.handle()->data[0], 0, stride * 4};
+                const GpuConverter::Plane y = {outputBlock->handle()->data[0], 0,
+                                               static_cast<uint32_t>(dstStrideY)};
+                const GpuConverter::Plane uv = {outputBlock->handle()->data[0],
+                                                static_cast<uint32_t>(dstUV - dstY),
+                                                static_cast<uint32_t>(dstStrideUV)};
+                if (mGpuConverter &&
+                    mGpuConverter->convertRgbaToNv12(src, width, height, y, uv,
+                                                     mVisibleSize.width, mVisibleSize.height)) {
+                    break;
+                }
+                if (mGpuConverter) {
+                    ALOGW("GPU conversion failed, going on with the CPU");
+                    mGpuConverter.reset();
+                    mGpuFailed = true;
+                }
+            }
             // There is no libyuv function to convert ABGR to NV12. Therefore, we first convert to
             // I420 on dst-Y plane and temporary U/V plane. Then we copy U and V pixels from
             // temporary planes to dst-UV interleavedly.
